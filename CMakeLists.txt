@@ -58,7 +58,10 @@ set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
 
 
 # osl
-	find_package(osl REQUIRED)
+	include_directories("$ENV{HOME}/openscop/include")
+	link_directories("$ENV{HOME}/openscop/lib")
+	set(OSL_LIBRARY osl)
+		
 
 # GMP & piplib
 	message(STATUS "---")

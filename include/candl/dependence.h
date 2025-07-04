@@ -64,8 +64,10 @@ struct osl_dependence* candl_dependence_isl_simplify(struct osl_dependence*,
 /*+***************************************************************************
  *                          Structure display function                       *
  *****************************************************************************/
-void                   candl_dependence_pprint(FILE*, struct osl_dependence*);
-void                   candl_dependence_view(struct osl_dependence*);
+// void                   candl_dependence_pprint(FILE*, struct osl_dependence*);
+// void                   candl_dependence_view(struct osl_dependence*);
+void candl_dependence_pprint(FILE*, struct osl_dependence*, struct osl_scop*, candl_options_p);
+void candl_dependence_view (struct osl_dependence*, struct osl_scop*, candl_options_p);
 
 /******************************************************************************
  *                             Processing functions                           *

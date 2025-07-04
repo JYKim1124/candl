@@ -133,6 +133,427 @@ void candl_dependence_get_array_refs_in_dep(osl_dependence_p tmp,
   *reft = osl_relation_get_array_id(targ);
 }
 
+static osl_dependence_p candl_dependence_build_system(
+                            osl_statement_p source, osl_statement_p target,
+                            osl_relation_p array_s, osl_relation_p array_t,
+                            int depth, int before) {
+  osl_dependence_p dependence;
+  osl_relation_p system;
+  int i, j, k, c;
+  int constraint = 0;
+  int precision = source->domain->precision;
+  int nb_output_dims; // source column
+  int nb_input_dims;  // target column
+  int nb_local_dims;
+  int nb_par;
+  int nb_rows, nb_columns;
+  int ind_source_local_domain;
+  int ind_source_local_access;
+  int ind_target_local_domain;
+  int ind_target_local_access;
+  int ind_params;
+  int min_depth = 0;
+  
+  /* Create a new dependence structure */
+  dependence = osl_dependence_malloc();
+  
+  /* Compute the maximal common depth. */
+  min_depth = CANDL_min(array_s->nb_output_dims, array_t->nb_output_dims);
+  
+  /* Compute the system size */
+  dependence->source_nb_output_dims_domain = source->domain->nb_output_dims;
+  dependence->source_nb_output_dims_access = array_s->nb_output_dims;
+  
+  dependence->target_nb_output_dims_domain = target->domain->nb_output_dims;
+  dependence->target_nb_output_dims_access = array_t->nb_output_dims;
+  
+  dependence->source_nb_local_dims_domain  = source->domain->nb_local_dims;
+  dependence->source_nb_local_dims_access  = array_s->nb_local_dims;
+  dependence->target_nb_local_dims_domain  = target->domain->nb_local_dims;
+  dependence->target_nb_local_dims_access  = array_t->nb_local_dims;
+    
+  nb_par         = source->domain->nb_parameters;
+  nb_local_dims  = dependence->source_nb_local_dims_domain +
+                   dependence->source_nb_local_dims_access +
+                   dependence->target_nb_local_dims_domain +
+                   dependence->target_nb_local_dims_access;
+  nb_output_dims = dependence->source_nb_output_dims_domain +
+                   dependence->source_nb_output_dims_access;
+  nb_input_dims  = dependence->target_nb_output_dims_domain +
+                   dependence->target_nb_output_dims_access;
+
+  nb_columns = nb_output_dims + nb_input_dims + nb_local_dims + nb_par + 2;
+  nb_rows    = source->domain->nb_rows + target->domain->nb_rows +
+               array_s->nb_rows + array_t->nb_rows +
+               min_depth + 
+               depth;
+
+  system = osl_relation_pmalloc(precision, nb_rows, nb_columns);
+  
+  /* Compute some indexes */
+  ind_source_local_domain = 1 + nb_output_dims + nb_input_dims;
+  ind_source_local_access = ind_source_local_domain + dependence->source_nb_local_dims_domain;
+  ind_target_local_domain = ind_source_local_access + dependence->source_nb_local_dims_access;
+  ind_target_local_access = ind_target_local_domain + dependence->target_nb_local_dims_domain;
+  ind_params              = ind_target_local_access + dependence->target_nb_local_dims_access;
+  
+  /* 1. Copy the source domain */
+  for (i = 0 ; i < source->domain->nb_rows ; i++) {
+    /* eq/in */
+    osl_int_assign(precision,
+                   &system->m[constraint][0], source->domain->m[i][0]);
+    /* output dims */
+    k = 1;
+    j = 1;
+    for (c = source->domain->nb_output_dims ; c > 0 ; c--, k++, j++)
+      osl_int_assign(precision,
+                     &system->m[constraint][k], source->domain->m[i][j]);
+    /* local dims (no input in domain, so j is the same) */
+    k = ind_source_local_domain;
+    for (c = source->domain->nb_local_dims ; c > 0 ; c--, k++, j++)
+      osl_int_assign(precision,
+                     &system->m[constraint][k], source->domain->m[i][j]);
+    /* params + const */
+    k = ind_params;
+    for (c = nb_par+1 ; c > 0 ; c--, k++, j++)
+      osl_int_assign(precision,
+                     &system->m[constraint][k], source->domain->m[i][j]);
+    constraint++;
+  }
+  
+  /* 2. Copy the target domain */
+  for (i = 0 ; i < target->domain->nb_rows ; i++) {
+    /* eq/in */
+    osl_int_assign(precision,
+                   &system->m[constraint][0], target->domain->m[i][0]);
+    /* output dims */
+    k = 1 + nb_output_dims;
+    j = 1;
+    for (c = target->domain->nb_output_dims ; c > 0 ; c--, k++, j++)
+      osl_int_assign(precision,
+                     &system->m[constraint][k], target->domain->m[i][j]);
+    /* local dims (no input in domain, so j is the same) */
+    k = ind_target_local_domain;
+    for (c = target->domain->nb_local_dims ; c > 0 ; c--, k++, j++)
+      osl_int_assign(precision,
+                     &system->m[constraint][k], target->domain->m[i][j]);
+    /* params + const */
+    k = ind_params;
+    for (c = nb_par+1 ; c > 0 ; c--, k++, j++)
+      osl_int_assign(precision,
+                     &system->m[constraint][k], target->domain->m[i][j]);
+    constraint++;
+  }
+  
+  /* 3. Copy the source access */
+  for (i = 0 ; i < array_s->nb_rows ; i++) {
+    /* eq/in */
+    osl_int_assign(precision,
+                   &system->m[constraint][0], array_s->m[i][0]);
+    /* output dims */
+    k = 1 + source->domain->nb_output_dims;
+    j = 1;
+    for (c = array_s->nb_output_dims ; c > 0 ; c--, k++, j++)
+      osl_int_assign(precision,
+                     &system->m[constraint][k], array_s->m[i][j]);
+    /* link input dims access to the output dims domain */
+    k = 1;
+    for (c = array_s->nb_input_dims ; c > 0 ; c--, k++, j++)
+      osl_int_assign(precision,
+                     &system->m[constraint][k], array_s->m[i][j]);
+    /* local dims */
+    k = ind_source_local_access;
+    for (c = array_s->nb_local_dims ; c > 0 ; c--, k++, j++)
+      osl_int_assign(precision,
+                     &system->m[constraint][k], array_s->m[i][j]);
+    /* params + const */
+    k = ind_params;
+    for (c = nb_par+1 ; c > 0 ; c--, k++, j++)
+      osl_int_assign(precision,
+                     &system->m[constraint][k], array_s->m[i][j]);
+    
+    constraint++;
+  }
+  
+  /* 4. Copy the target access */
+  for (i = 0 ; i < array_t->nb_rows ; i++) {
+    /* eq/in */
+    osl_int_assign(precision,
+                   &system->m[constraint][0], array_t->m[i][0]);
+    /* output dims */
+    k = 1 + nb_output_dims + target->domain->nb_output_dims;
+    j = 1;
+    for (c = array_t->nb_output_dims ; c > 0 ; c--, k++, j++) {
+      osl_int_assign(precision,
+                     &system->m[constraint][k], array_t->m[i][j]);
+      osl_int_oppose(precision,
+                     &system->m[constraint][k], system->m[constraint][k]);
+    }
+    /* link input dims access to the output dims domain */
+    k = 1 + nb_output_dims;
+    for (c = array_t->nb_input_dims ; c > 0 ; c--, k++, j++) {
+      osl_int_assign(precision,
+                     &system->m[constraint][k], array_t->m[i][j]);
+      osl_int_oppose(precision,
+                     &system->m[constraint][k], system->m[constraint][k]);
+    }
+    /* local dims */
+    k = ind_target_local_access;
+    for (c = array_t->nb_local_dims ; c > 0 ; c--, k++, j++) {
+      osl_int_assign(precision,
+                     &system->m[constraint][k], array_t->m[i][j]);
+      osl_int_oppose(precision,
+                     &system->m[constraint][k], system->m[constraint][k]);
+    }
+    /* params + const */
+    k = ind_params;
+    for (c = nb_par+1 ; c > 0 ; c--, k++, j++) {
+      osl_int_assign(precision,
+                     &system->m[constraint][k], array_t->m[i][j]);
+      osl_int_oppose(precision,
+                     &system->m[constraint][k], system->m[constraint][k]);
+    }
+    constraint++;
+  }
+  
+  
+  /* 5. Set the equality between the output access */
+  /* Note here that the equality between the 2 Arr are necessarily equal */
+  k = 1 + source->domain->nb_output_dims;
+  j = 1 + nb_output_dims + target->domain->nb_output_dims;
+  for (i = 0 ; i < min_depth ; i++, k++, j++) {
+    osl_int_set_si(precision, &system->m[constraint][k], -1);
+    osl_int_set_si(precision, &system->m[constraint][j], 1);
+    constraint++;
+  }
+  
+  /* 6. The precedence constraints */
+  int min_dim = 0;
+  while (min_dim < ((candl_statement_usr_p)source->usr)->depth && 
+         min_dim < ((candl_statement_usr_p)target->usr)->depth &&
+         ((candl_statement_usr_p)source->usr)->index[min_dim] ==
+         ((candl_statement_usr_p)target->usr)->index[min_dim])
+    ++min_dim;
+
+  k = 1;
+  j = 1 + nb_output_dims;
+  for (i = 0; i < depth; i++, k++, j++) {
+    /* i = i' for all dimension less than depth. */
+    osl_int_set_si(precision, &system->m[constraint][k], -1);
+    osl_int_set_si(precision, &system->m[constraint][j], 1);
+    if (i == depth - 1) {
+      /* i <= i' at dimension depth if source is textually before target. */
+      osl_int_set_si(precision, &system->m[constraint][0], 1);
+      /* If source is textually after target, this is obviously i < i'. */
+      if (before || depth < min_dim) // sub 1 for the Arr dim
+        osl_int_set_si(precision, &system->m[constraint][nb_columns - 1], -1);
+    }
+
+    constraint++;
+  }
+  
+  system->nb_output_dims = nb_output_dims;
+  system->nb_input_dims = nb_input_dims;
+  system->nb_parameters = nb_par;
+  system->nb_local_dims = nb_local_dims;
+  system->type = OSL_UNDEFINED;
+  
+  dependence->domain = system;
+  
+  return dependence; 
+}
+
+
+osl_dependence_p candl_dependence_system(osl_statement_p source,
+                                           osl_statement_p target,
+                                           osl_relation_p context,
+                                           osl_relation_p array_s,
+                                           osl_relation_p array_t,
+                                           int ref_s, int ref_t,
+                                           int type, int depth) {
+  candl_statement_usr_p s_usr = source->usr;
+  candl_statement_usr_p t_usr = target->usr;
+  osl_dependence_p dependence = NULL;
+
+  /* First, a trivial case: for two different statements at depth 0, there is
+   * a dependence only if the source is textually before the target.
+   */
+  if ((source != target) && (depth == 0) && 
+      (s_usr->label > t_usr->label))
+    return NULL;
+    
+  /* We build the system of constraints. */
+  dependence = candl_dependence_build_system(source,  target,
+                                             array_s, array_t, 
+                                             depth,
+                                             (s_usr->label >= 
+                                              t_usr->label));
+
+  /* We start by simple SIV/ZIV/GCD tests. */
+  if (!candl_dependence_gcd_test(source, target, dependence->domain, depth)) {
+    osl_dependence_free(dependence);
+    return NULL;
+  }
+
+  if (pip_has_rational_point(dependence->domain, context, 1)) {
+    /* We set the various fields with corresponding values. */
+    dependence->ref_source = ref_s;
+    dependence->ref_target = ref_t;      
+    dependence->label_source = ((candl_statement_usr_p)source->usr)->label;
+    dependence->label_target = ((candl_statement_usr_p)target->usr)->label;
+    dependence->type  = type;
+    dependence->depth = depth;
+    dependence->stmt_source_ptr       = source;
+    dependence->stmt_target_ptr       = target;
+    dependence->ref_source_access_ptr = array_s;
+    dependence->ref_target_access_ptr = array_t;
+  } else {
+    osl_dependence_free(dependence);
+    dependence = NULL;
+  }
+
+  return dependence;
+}
+/**
+ * candl_dependence_between function :
+ * this function builds the dependence list from the statement "source" to
+ * statement "target": it will study the dependence for each reference and for
+ * each depth, under a particular context (context) and according to some
+ * user options.
+ * - 18/09/2003: first version.
+ * - 07/12/2005: (debug) correction of depth bounds.
+ * - 09/12/2005: We may take commutativity into consideration.
+ */
+osl_dependence_p candl_dependence_between(osl_statement_p source,
+                                            osl_statement_p target,
+                                            osl_relation_p context,
+                                            candl_options_p options) {
+  osl_dependence_p new;
+  osl_dependence_p dependence = NULL;
+  osl_dependence_p now;
+  osl_relation_list_p access_src, access_targ;
+  osl_relation_p elt_src, elt_targ;
+  candl_statement_usr_p s_usr = source->usr;
+  candl_statement_usr_p t_usr = target->usr;
+  int i, min_depth, max_depth;
+  int src_id, targ_id;
+  int ref_s, ref_t;
+  
+  /* If the statements commute and the user asks to use this information to
+   * simplify the dependence graph, we return no dependences.
+   */
+  if (options->commute && candl_util_statement_commute(source, target))
+    return NULL;
+
+  /* In the case of a self-dependence, the dependence depth can be as low as 1
+   * (not 0 because at depth 0 there is no loop, thus there is only one
+   * instance of the statement !) and as high as the statement depth.
+   * In the case of different statements, the dependence depth can be as low
+   * as 0 and as high as the number of shared loops.
+   */
+  if (source == target) {
+    min_depth = 1;
+    max_depth = s_usr->depth;
+  } else {
+    /* Depth 0 is for statements that don't share any loop. */
+    if (s_usr->depth > 0 && t_usr->depth > 0)
+      min_depth = (s_usr->index[0] == t_usr->index[0]) ? 1 : 0;
+    else
+      min_depth = 0;
+
+    max_depth = 0;
+    while ((max_depth < s_usr->depth) &&
+           (max_depth < t_usr->depth) &&
+           (s_usr->index[max_depth] == t_usr->index[max_depth]))
+      max_depth++;
+  }
+  
+  ref_s = 0;
+  access_src = source->access;
+  
+  for (; access_src != NULL; access_src = access_src->next, ref_s++) {
+    elt_src = access_src->elt;
+    src_id = osl_relation_get_array_id(elt_src);
+    
+    switch(elt_src->type) {
+    
+      /* Anti and input-dependences analysis. */
+      case OSL_TYPE_READ: /* source READ */
+        if (!options->war && !options->rar)
+          break;
+        access_targ = target->access;
+        ref_t = 0;
+        for (; access_targ != NULL; access_targ = access_targ->next, ref_t++) {
+          elt_targ = access_targ->elt;
+          targ_id  = osl_relation_get_array_id(elt_targ);
+          
+          /* Anti-dependences analysis. */
+          if (elt_targ->type != OSL_TYPE_READ) { /* target WRITE | MAY_WRITE */
+            if (options->war && src_id == targ_id) {
+              for (i = min_depth; i <= max_depth; i++) {
+                new = candl_dependence_system(source, target, context,
+                                              elt_src, elt_targ,
+                                              ref_s, ref_t,
+                                              OSL_DEPENDENCE_WAR, i);
+                osl_dependence_add(&dependence, &now, new);
+              }
+            }
+          }
+          /* Input-dependences analysis. */
+          else { /* target READ */
+            if (options->rar && src_id == targ_id) {
+              for (i = min_depth; i <= max_depth; i++) {
+                new = candl_dependence_system(source, target, context,
+                                              elt_src, elt_targ,
+                                              ref_s, ref_t,
+                                              OSL_DEPENDENCE_RAR, i);
+                osl_dependence_add(&dependence, &now, new);
+              }
+            }
+          }
+        }
+        break;
+     
+      default: /* source WRITE | MAY-WRITE */
+        if (!options->raw && !options->waw)
+          break;
+        access_targ = target->access;
+        ref_t = 0;
+        for (; access_targ != NULL; access_targ = access_targ->next, ref_t++) {
+          elt_targ = access_targ->elt;
+          targ_id = osl_relation_get_array_id(elt_targ);
+          
+          /* Anti-dependences analysis. */
+          if (elt_targ->type != OSL_TYPE_READ) { /* target WRITE | MAY_WRITE */
+            if (options->waw && src_id == targ_id) {
+              for (i = min_depth; i <= max_depth; i++) {
+                new = candl_dependence_system(source, target, context,
+                                              elt_src, elt_targ,
+                                              ref_s, ref_t,
+                                              OSL_DEPENDENCE_WAW, i);
+                osl_dependence_add(&dependence, &now, new);
+              }
+            }
+          }
+          /* Input-dependences analysis. */
+          else { /* target READ */
+            if (options->raw && src_id == targ_id) {
+              for (i = min_depth; i <= max_depth; i++) {
+                new = candl_dependence_system(source, target, context,
+                                              elt_src, elt_targ,
+                                              ref_s, ref_t,
+                                              OSL_DEPENDENCE_RAW, i);
+                osl_dependence_add(&dependence, &now, new);
+              }
+            }
+          }
+        }
+        break;
+    }
+  }
+  
+  return dependence;
+}
 
 /* osl_dependence_pprint function:
  * This function prints the content of a osl_dependence_p structure (dependence)
@@ -140,37 +561,149 @@ void candl_dependence_get_array_refs_in_dep(osl_dependence_p tmp,
  * See http://www.graphviz.org
  * - 08/12/2005: first version.
  */
-void candl_dependence_pprint(FILE * file, osl_dependence_p dependence) {
-  int i = 0;
+// void candl_dependence_pprint(FILE * file, osl_dependence_p dependence) {
+//   int i = 0;
   
-  fprintf(file, "digraph G {\n");
+//   fprintf(file, "digraph G {\n");
 
-  fprintf(file, "# Data Dependence Graph\n");
-  fprintf(file, "# Generated by Candl "CANDL_RELEASE" "CANDL_VERSION" bits\n");
-  while (dependence != NULL) {
-    fprintf(file, "  S%d -> S%d [label=\" ", dependence->label_source,
-                                             dependence->label_target);
-    switch (dependence->type) {
-      case OSL_UNDEFINED : fprintf(file, "UNSET"); break;
-      case OSL_DEPENDENCE_RAW   : fprintf(file, "RAW") ; break;
-      case OSL_DEPENDENCE_WAR   : fprintf(file, "WAR") ; break;
-      case OSL_DEPENDENCE_WAW   : fprintf(file, "WAW") ; break;
-      case OSL_DEPENDENCE_RAR   : fprintf(file, "RAR") ; break;
-      case OSL_DEPENDENCE_RAW_SCALPRIV   :
-           fprintf(file, "RAW_SCALPRIV (scalar-priv)") ; break;
-      default : fprintf(file, "unknown"); break;
+//   fprintf(file, "# Data Dependence Graph\n");
+//   fprintf(file, "# Generated by Candl "CANDL_RELEASE" "CANDL_VERSION" bits\n");
+//   while (dependence != NULL) {
+//     fprintf(file, "  S%d -> S%d [label=\" ", dependence->label_source,
+//                                              dependence->label_target);
+//     switch (dependence->type) {
+//       case OSL_UNDEFINED : fprintf(file, "UNSET"); break;
+//       case OSL_DEPENDENCE_RAW   : fprintf(file, "RAW") ; break;
+//       case OSL_DEPENDENCE_WAR   : fprintf(file, "WAR") ; break;
+//       case OSL_DEPENDENCE_WAW   : fprintf(file, "WAW") ; break;
+//       case OSL_DEPENDENCE_RAR   : fprintf(file, "RAR") ; break;
+//       case OSL_DEPENDENCE_RAW_SCALPRIV   :
+//            fprintf(file, "RAW_SCALPRIV (scalar-priv)") ; break;
+//       default : fprintf(file, "unknown"); break;
+//     }
+//     fprintf(file, " depth %d, ref %d->%d \"];\n", dependence->depth,
+//             dependence->ref_source,
+//             dependence->ref_target);
+//     dependence = dependence->next;
+//     i++;
+//   }
+
+//   if (i>4)
+//     fprintf(file, "# Number of edges = %i\n}\n", i);
+//   else
+//     fprintf(file, "}\n");
+// }
+
+
+void candl_dependence_pprint(FILE *file,
+                            osl_dependence_p dependence,
+                            osl_scop_p scop, candl_options_p options)
+{
+  int edge_count = 0;
+
+  int refs = 0, reft = 0;
+  int nb_stmt = 0;
+  osl_dependence_p dep = NULL;
+  osl_dependence_p new = NULL;
+  osl_dependence_p now;
+  osl_statement_p stmt_i, stmt_j;
+  osl_relation_p context = scop->context;
+  candl_statement_usr_p stmt_usr;
+  
+  osl_body_p body = NULL;
+  size_t i, nb_strings;
+  osl_strings_p iterator = NULL;
+  
+  // We start the dot file.
+  fprintf(file, "# Statement information\n");
+
+  stmt_i = scop->statement;
+  for (; stmt_i != NULL; stmt_i = stmt_i->next) {
+    stmt_usr = stmt_i->usr;
+
+    /* We add self dependence. */
+    /* S->S */
+    new = candl_dependence_between(stmt_i, stmt_i, context, options);
+    osl_dependence_add(&dep, &now, new);
+
+    /* print the statement information. */
+    fprintf(file, "  S%d [ depth = %d, iterators = \"", nb_stmt, stmt_usr->depth);
+
+    body = (osl_body_p)osl_generic_lookup(stmt_i->extension, OSL_URI_BODY);
+    iterator = body->iterators;
+
+    if (iterator != NULL) {
+      nb_strings = osl_strings_size(iterator);
+      for (i = 0; i < nb_strings; i++){
+        fprintf(file, "%s", iterator->string[i]);
+        if(!(i== nb_strings - 1))
+          fprintf(file, ", ");
+      }
+      fprintf(file, "\" ]\n");
+    } else
+      fprintf(file, "\t]\n");
+    
+    stmt_j = stmt_i->next;
+    for (; stmt_j != NULL; stmt_j = stmt_j ->next) {
+      /* And dependences with other statements. */
+      /* S1->S2 */
+      new = candl_dependence_between(stmt_i, stmt_j, context, options);
+      osl_dependence_add(&dep, &now, new);
+
+      /* S2->S1 */
+      new = candl_dependence_between(stmt_j, stmt_i, context, options);
+      osl_dependence_add(&dep, &now, new);
     }
-    fprintf(file, " depth %d, ref %d->%d \"];\n", dependence->depth,
-            dependence->ref_source,
-            dependence->ref_target);
-    dependence = dependence->next;
-    i++;
+    ++nb_stmt;
   }
 
-  if (i>4)
-    fprintf(file, "# Number of edges = %i\n}\n", i);
+  // print the header of the dot file.
+  fprintf(file, "\n# Data Dependence Graph\n");
+  fprintf(file, "digraph G {\n");
+
+  while (dep) {
+      /* S<source> -> S<target> */
+      fprintf(file, "  S%d -> S%d [label=\" ",
+              dep->label_source,
+              dep->label_target);
+
+      /* dependence type */
+      switch (dep->type) {
+        case OSL_UNDEFINED:
+          fprintf(file, "UNSET"); break;
+        case OSL_DEPENDENCE_RAW:
+          fprintf(file, "RAW"); break;
+        case OSL_DEPENDENCE_WAR:
+          fprintf(file, "WAR"); break;
+        case OSL_DEPENDENCE_WAW:
+          fprintf(file, "WAW"); break;
+        case OSL_DEPENDENCE_RAR:
+          fprintf(file, "RAR"); break;
+        case OSL_DEPENDENCE_RAW_SCALPRIV:
+          fprintf(file, "RAW_SCALPRIV"); break;
+        default:
+          fprintf(file, "UNKNOWN"); break;
+      }
+      
+      candl_dependence_get_array_refs_in_dep(dep, &refs, &reft);
+
+      osl_generic_p generic_list = scop->extension;
+
+      osl_arrays_p arrays_data = (osl_arrays_p)osl_generic_lookup(generic_list, OSL_URI_ARRAYS);
+      fprintf(file, " depth %d, ref %d->%d, var %s->%s \"];\n", dep->depth,
+        dep->ref_source,
+        dep->ref_target,
+        arrays_data->names[refs-1],
+        arrays_data->names[reft-1]);
+
+
+      dep = dep->next;
+      ++edge_count;
+  }
+  if (edge_count > 4)
+      fprintf(file, "# Number of edges = %d\n}\n", edge_count);
   else
-    fprintf(file, "}\n");
+      fprintf(file, "}\n");
 }
 
 
@@ -180,10 +713,11 @@ void candl_dependence_pprint(FILE * file, osl_dependence_p dependence) {
  * dependence graph.
  * - 20/03/2006: first version.
  */
-void candl_dependence_view(osl_dependence_p dep) {
+void candl_dependence_view(osl_dependence_p dep, osl_scop_p scop, 
+                           candl_options_p options) {
   FILE * temp_output;
   temp_output = fopen(CANDL_TEMP_OUTPUT,"w+");
-  candl_dependence_pprint(temp_output, dep);
+  candl_dependence_pprint(temp_output, dep, scop, options);
   fclose(temp_output);
   /* check the return to remove the warning compilation */
   if(system("dot -Tps "CANDL_TEMP_OUTPUT" | gv - && rm -f "CANDL_TEMP_OUTPUT" &"))
@@ -479,235 +1013,235 @@ int candl_dependence_gcd_test(osl_statement_p source,
  * - 23/02/2006: a stupid bug corrected in the subscript equality.
  * - 07/04/2007: fix the precedence condition to respect C. Bastoul PhD thesis
  */
-static osl_dependence_p candl_dependence_build_system(
-                            osl_statement_p source, osl_statement_p target,
-                            osl_relation_p array_s, osl_relation_p array_t,
-                            int depth, int before) {
-  osl_dependence_p dependence;
-  osl_relation_p system;
-  int i, j, k, c;
-  int constraint = 0;
-  int precision = source->domain->precision;
-  int nb_output_dims; // source column
-  int nb_input_dims;  // target column
-  int nb_local_dims;
-  int nb_par;
-  int nb_rows, nb_columns;
-  int ind_source_local_domain;
-  int ind_source_local_access;
-  int ind_target_local_domain;
-  int ind_target_local_access;
-  int ind_params;
-  int min_depth = 0;
+// static osl_dependence_p candl_dependence_build_system(
+//                             osl_statement_p source, osl_statement_p target,
+//                             osl_relation_p array_s, osl_relation_p array_t,
+//                             int depth, int before) {
+//   osl_dependence_p dependence;
+//   osl_relation_p system;
+//   int i, j, k, c;
+//   int constraint = 0;
+//   int precision = source->domain->precision;
+//   int nb_output_dims; // source column
+//   int nb_input_dims;  // target column
+//   int nb_local_dims;
+//   int nb_par;
+//   int nb_rows, nb_columns;
+//   int ind_source_local_domain;
+//   int ind_source_local_access;
+//   int ind_target_local_domain;
+//   int ind_target_local_access;
+//   int ind_params;
+//   int min_depth = 0;
   
-  /* Create a new dependence structure */
-  dependence = osl_dependence_malloc();
+//   /* Create a new dependence structure */
+//   dependence = osl_dependence_malloc();
   
-  /* Compute the maximal common depth. */
-  min_depth = CANDL_min(array_s->nb_output_dims, array_t->nb_output_dims);
+//   /* Compute the maximal common depth. */
+//   min_depth = CANDL_min(array_s->nb_output_dims, array_t->nb_output_dims);
   
-  /* Compute the system size */
-  dependence->source_nb_output_dims_domain = source->domain->nb_output_dims;
-  dependence->source_nb_output_dims_access = array_s->nb_output_dims;
+//   /* Compute the system size */
+//   dependence->source_nb_output_dims_domain = source->domain->nb_output_dims;
+//   dependence->source_nb_output_dims_access = array_s->nb_output_dims;
   
-  dependence->target_nb_output_dims_domain = target->domain->nb_output_dims;
-  dependence->target_nb_output_dims_access = array_t->nb_output_dims;
+//   dependence->target_nb_output_dims_domain = target->domain->nb_output_dims;
+//   dependence->target_nb_output_dims_access = array_t->nb_output_dims;
   
-  dependence->source_nb_local_dims_domain  = source->domain->nb_local_dims;
-  dependence->source_nb_local_dims_access  = array_s->nb_local_dims;
-  dependence->target_nb_local_dims_domain  = target->domain->nb_local_dims;
-  dependence->target_nb_local_dims_access  = array_t->nb_local_dims;
+//   dependence->source_nb_local_dims_domain  = source->domain->nb_local_dims;
+//   dependence->source_nb_local_dims_access  = array_s->nb_local_dims;
+//   dependence->target_nb_local_dims_domain  = target->domain->nb_local_dims;
+//   dependence->target_nb_local_dims_access  = array_t->nb_local_dims;
     
-  nb_par         = source->domain->nb_parameters;
-  nb_local_dims  = dependence->source_nb_local_dims_domain +
-                   dependence->source_nb_local_dims_access +
-                   dependence->target_nb_local_dims_domain +
-                   dependence->target_nb_local_dims_access;
-  nb_output_dims = dependence->source_nb_output_dims_domain +
-                   dependence->source_nb_output_dims_access;
-  nb_input_dims  = dependence->target_nb_output_dims_domain +
-                   dependence->target_nb_output_dims_access;
+//   nb_par         = source->domain->nb_parameters;
+//   nb_local_dims  = dependence->source_nb_local_dims_domain +
+//                    dependence->source_nb_local_dims_access +
+//                    dependence->target_nb_local_dims_domain +
+//                    dependence->target_nb_local_dims_access;
+//   nb_output_dims = dependence->source_nb_output_dims_domain +
+//                    dependence->source_nb_output_dims_access;
+//   nb_input_dims  = dependence->target_nb_output_dims_domain +
+//                    dependence->target_nb_output_dims_access;
 
-  nb_columns = nb_output_dims + nb_input_dims + nb_local_dims + nb_par + 2;
-  nb_rows    = source->domain->nb_rows + target->domain->nb_rows +
-               array_s->nb_rows + array_t->nb_rows +
-               min_depth + 
-               depth;
+//   nb_columns = nb_output_dims + nb_input_dims + nb_local_dims + nb_par + 2;
+//   nb_rows    = source->domain->nb_rows + target->domain->nb_rows +
+//                array_s->nb_rows + array_t->nb_rows +
+//                min_depth + 
+//                depth;
 
-  system = osl_relation_pmalloc(precision, nb_rows, nb_columns);
+//   system = osl_relation_pmalloc(precision, nb_rows, nb_columns);
   
-  /* Compute some indexes */
-  ind_source_local_domain = 1 + nb_output_dims + nb_input_dims;
-  ind_source_local_access = ind_source_local_domain + dependence->source_nb_local_dims_domain;
-  ind_target_local_domain = ind_source_local_access + dependence->source_nb_local_dims_access;
-  ind_target_local_access = ind_target_local_domain + dependence->target_nb_local_dims_domain;
-  ind_params              = ind_target_local_access + dependence->target_nb_local_dims_access;
+//   /* Compute some indexes */
+//   ind_source_local_domain = 1 + nb_output_dims + nb_input_dims;
+//   ind_source_local_access = ind_source_local_domain + dependence->source_nb_local_dims_domain;
+//   ind_target_local_domain = ind_source_local_access + dependence->source_nb_local_dims_access;
+//   ind_target_local_access = ind_target_local_domain + dependence->target_nb_local_dims_domain;
+//   ind_params              = ind_target_local_access + dependence->target_nb_local_dims_access;
   
-  /* 1. Copy the source domain */
-  for (i = 0 ; i < source->domain->nb_rows ; i++) {
-    /* eq/in */
-    osl_int_assign(precision,
-                   &system->m[constraint][0], source->domain->m[i][0]);
-    /* output dims */
-    k = 1;
-    j = 1;
-    for (c = source->domain->nb_output_dims ; c > 0 ; c--, k++, j++)
-      osl_int_assign(precision,
-                     &system->m[constraint][k], source->domain->m[i][j]);
-    /* local dims (no input in domain, so j is the same) */
-    k = ind_source_local_domain;
-    for (c = source->domain->nb_local_dims ; c > 0 ; c--, k++, j++)
-      osl_int_assign(precision,
-                     &system->m[constraint][k], source->domain->m[i][j]);
-    /* params + const */
-    k = ind_params;
-    for (c = nb_par+1 ; c > 0 ; c--, k++, j++)
-      osl_int_assign(precision,
-                     &system->m[constraint][k], source->domain->m[i][j]);
-    constraint++;
-  }
+//   /* 1. Copy the source domain */
+//   for (i = 0 ; i < source->domain->nb_rows ; i++) {
+//     /* eq/in */
+//     osl_int_assign(precision,
+//                    &system->m[constraint][0], source->domain->m[i][0]);
+//     /* output dims */
+//     k = 1;
+//     j = 1;
+//     for (c = source->domain->nb_output_dims ; c > 0 ; c--, k++, j++)
+//       osl_int_assign(precision,
+//                      &system->m[constraint][k], source->domain->m[i][j]);
+//     /* local dims (no input in domain, so j is the same) */
+//     k = ind_source_local_domain;
+//     for (c = source->domain->nb_local_dims ; c > 0 ; c--, k++, j++)
+//       osl_int_assign(precision,
+//                      &system->m[constraint][k], source->domain->m[i][j]);
+//     /* params + const */
+//     k = ind_params;
+//     for (c = nb_par+1 ; c > 0 ; c--, k++, j++)
+//       osl_int_assign(precision,
+//                      &system->m[constraint][k], source->domain->m[i][j]);
+//     constraint++;
+//   }
   
-  /* 2. Copy the target domain */
-  for (i = 0 ; i < target->domain->nb_rows ; i++) {
-    /* eq/in */
-    osl_int_assign(precision,
-                   &system->m[constraint][0], target->domain->m[i][0]);
-    /* output dims */
-    k = 1 + nb_output_dims;
-    j = 1;
-    for (c = target->domain->nb_output_dims ; c > 0 ; c--, k++, j++)
-      osl_int_assign(precision,
-                     &system->m[constraint][k], target->domain->m[i][j]);
-    /* local dims (no input in domain, so j is the same) */
-    k = ind_target_local_domain;
-    for (c = target->domain->nb_local_dims ; c > 0 ; c--, k++, j++)
-      osl_int_assign(precision,
-                     &system->m[constraint][k], target->domain->m[i][j]);
-    /* params + const */
-    k = ind_params;
-    for (c = nb_par+1 ; c > 0 ; c--, k++, j++)
-      osl_int_assign(precision,
-                     &system->m[constraint][k], target->domain->m[i][j]);
-    constraint++;
-  }
+//   /* 2. Copy the target domain */
+//   for (i = 0 ; i < target->domain->nb_rows ; i++) {
+//     /* eq/in */
+//     osl_int_assign(precision,
+//                    &system->m[constraint][0], target->domain->m[i][0]);
+//     /* output dims */
+//     k = 1 + nb_output_dims;
+//     j = 1;
+//     for (c = target->domain->nb_output_dims ; c > 0 ; c--, k++, j++)
+//       osl_int_assign(precision,
+//                      &system->m[constraint][k], target->domain->m[i][j]);
+//     /* local dims (no input in domain, so j is the same) */
+//     k = ind_target_local_domain;
+//     for (c = target->domain->nb_local_dims ; c > 0 ; c--, k++, j++)
+//       osl_int_assign(precision,
+//                      &system->m[constraint][k], target->domain->m[i][j]);
+//     /* params + const */
+//     k = ind_params;
+//     for (c = nb_par+1 ; c > 0 ; c--, k++, j++)
+//       osl_int_assign(precision,
+//                      &system->m[constraint][k], target->domain->m[i][j]);
+//     constraint++;
+//   }
   
-  /* 3. Copy the source access */
-  for (i = 0 ; i < array_s->nb_rows ; i++) {
-    /* eq/in */
-    osl_int_assign(precision,
-                   &system->m[constraint][0], array_s->m[i][0]);
-    /* output dims */
-    k = 1 + source->domain->nb_output_dims;
-    j = 1;
-    for (c = array_s->nb_output_dims ; c > 0 ; c--, k++, j++)
-      osl_int_assign(precision,
-                     &system->m[constraint][k], array_s->m[i][j]);
-    /* link input dims access to the output dims domain */
-    k = 1;
-    for (c = array_s->nb_input_dims ; c > 0 ; c--, k++, j++)
-      osl_int_assign(precision,
-                     &system->m[constraint][k], array_s->m[i][j]);
-    /* local dims */
-    k = ind_source_local_access;
-    for (c = array_s->nb_local_dims ; c > 0 ; c--, k++, j++)
-      osl_int_assign(precision,
-                     &system->m[constraint][k], array_s->m[i][j]);
-    /* params + const */
-    k = ind_params;
-    for (c = nb_par+1 ; c > 0 ; c--, k++, j++)
-      osl_int_assign(precision,
-                     &system->m[constraint][k], array_s->m[i][j]);
+//   /* 3. Copy the source access */
+//   for (i = 0 ; i < array_s->nb_rows ; i++) {
+//     /* eq/in */
+//     osl_int_assign(precision,
+//                    &system->m[constraint][0], array_s->m[i][0]);
+//     /* output dims */
+//     k = 1 + source->domain->nb_output_dims;
+//     j = 1;
+//     for (c = array_s->nb_output_dims ; c > 0 ; c--, k++, j++)
+//       osl_int_assign(precision,
+//                      &system->m[constraint][k], array_s->m[i][j]);
+//     /* link input dims access to the output dims domain */
+//     k = 1;
+//     for (c = array_s->nb_input_dims ; c > 0 ; c--, k++, j++)
+//       osl_int_assign(precision,
+//                      &system->m[constraint][k], array_s->m[i][j]);
+//     /* local dims */
+//     k = ind_source_local_access;
+//     for (c = array_s->nb_local_dims ; c > 0 ; c--, k++, j++)
+//       osl_int_assign(precision,
+//                      &system->m[constraint][k], array_s->m[i][j]);
+//     /* params + const */
+//     k = ind_params;
+//     for (c = nb_par+1 ; c > 0 ; c--, k++, j++)
+//       osl_int_assign(precision,
+//                      &system->m[constraint][k], array_s->m[i][j]);
     
-    constraint++;
-  }
+//     constraint++;
+//   }
   
-  /* 4. Copy the target access */
-  for (i = 0 ; i < array_t->nb_rows ; i++) {
-    /* eq/in */
-    osl_int_assign(precision,
-                   &system->m[constraint][0], array_t->m[i][0]);
-    /* output dims */
-    k = 1 + nb_output_dims + target->domain->nb_output_dims;
-    j = 1;
-    for (c = array_t->nb_output_dims ; c > 0 ; c--, k++, j++) {
-      osl_int_assign(precision,
-                     &system->m[constraint][k], array_t->m[i][j]);
-      osl_int_oppose(precision,
-                     &system->m[constraint][k], system->m[constraint][k]);
-    }
-    /* link input dims access to the output dims domain */
-    k = 1 + nb_output_dims;
-    for (c = array_t->nb_input_dims ; c > 0 ; c--, k++, j++) {
-      osl_int_assign(precision,
-                     &system->m[constraint][k], array_t->m[i][j]);
-      osl_int_oppose(precision,
-                     &system->m[constraint][k], system->m[constraint][k]);
-    }
-    /* local dims */
-    k = ind_target_local_access;
-    for (c = array_t->nb_local_dims ; c > 0 ; c--, k++, j++) {
-      osl_int_assign(precision,
-                     &system->m[constraint][k], array_t->m[i][j]);
-      osl_int_oppose(precision,
-                     &system->m[constraint][k], system->m[constraint][k]);
-    }
-    /* params + const */
-    k = ind_params;
-    for (c = nb_par+1 ; c > 0 ; c--, k++, j++) {
-      osl_int_assign(precision,
-                     &system->m[constraint][k], array_t->m[i][j]);
-      osl_int_oppose(precision,
-                     &system->m[constraint][k], system->m[constraint][k]);
-    }
-    constraint++;
-  }
+//   /* 4. Copy the target access */
+//   for (i = 0 ; i < array_t->nb_rows ; i++) {
+//     /* eq/in */
+//     osl_int_assign(precision,
+//                    &system->m[constraint][0], array_t->m[i][0]);
+//     /* output dims */
+//     k = 1 + nb_output_dims + target->domain->nb_output_dims;
+//     j = 1;
+//     for (c = array_t->nb_output_dims ; c > 0 ; c--, k++, j++) {
+//       osl_int_assign(precision,
+//                      &system->m[constraint][k], array_t->m[i][j]);
+//       osl_int_oppose(precision,
+//                      &system->m[constraint][k], system->m[constraint][k]);
+//     }
+//     /* link input dims access to the output dims domain */
+//     k = 1 + nb_output_dims;
+//     for (c = array_t->nb_input_dims ; c > 0 ; c--, k++, j++) {
+//       osl_int_assign(precision,
+//                      &system->m[constraint][k], array_t->m[i][j]);
+//       osl_int_oppose(precision,
+//                      &system->m[constraint][k], system->m[constraint][k]);
+//     }
+//     /* local dims */
+//     k = ind_target_local_access;
+//     for (c = array_t->nb_local_dims ; c > 0 ; c--, k++, j++) {
+//       osl_int_assign(precision,
+//                      &system->m[constraint][k], array_t->m[i][j]);
+//       osl_int_oppose(precision,
+//                      &system->m[constraint][k], system->m[constraint][k]);
+//     }
+//     /* params + const */
+//     k = ind_params;
+//     for (c = nb_par+1 ; c > 0 ; c--, k++, j++) {
+//       osl_int_assign(precision,
+//                      &system->m[constraint][k], array_t->m[i][j]);
+//       osl_int_oppose(precision,
+//                      &system->m[constraint][k], system->m[constraint][k]);
+//     }
+//     constraint++;
+//   }
   
   
-  /* 5. Set the equality between the output access */
-  /* Note here that the equality between the 2 Arr are necessarily equal */
-  k = 1 + source->domain->nb_output_dims;
-  j = 1 + nb_output_dims + target->domain->nb_output_dims;
-  for (i = 0 ; i < min_depth ; i++, k++, j++) {
-    osl_int_set_si(precision, &system->m[constraint][k], -1);
-    osl_int_set_si(precision, &system->m[constraint][j], 1);
-    constraint++;
-  }
+//   /* 5. Set the equality between the output access */
+//   /* Note here that the equality between the 2 Arr are necessarily equal */
+//   k = 1 + source->domain->nb_output_dims;
+//   j = 1 + nb_output_dims + target->domain->nb_output_dims;
+//   for (i = 0 ; i < min_depth ; i++, k++, j++) {
+//     osl_int_set_si(precision, &system->m[constraint][k], -1);
+//     osl_int_set_si(precision, &system->m[constraint][j], 1);
+//     constraint++;
+//   }
   
-  /* 6. The precedence constraints */
-  int min_dim = 0;
-  while (min_dim < ((candl_statement_usr_p)source->usr)->depth && 
-         min_dim < ((candl_statement_usr_p)target->usr)->depth &&
-         ((candl_statement_usr_p)source->usr)->index[min_dim] ==
-         ((candl_statement_usr_p)target->usr)->index[min_dim])
-    ++min_dim;
+//   /* 6. The precedence constraints */
+//   int min_dim = 0;
+//   while (min_dim < ((candl_statement_usr_p)source->usr)->depth && 
+//          min_dim < ((candl_statement_usr_p)target->usr)->depth &&
+//          ((candl_statement_usr_p)source->usr)->index[min_dim] ==
+//          ((candl_statement_usr_p)target->usr)->index[min_dim])
+//     ++min_dim;
 
-  k = 1;
-  j = 1 + nb_output_dims;
-  for (i = 0; i < depth; i++, k++, j++) {
-    /* i = i' for all dimension less than depth. */
-    osl_int_set_si(precision, &system->m[constraint][k], -1);
-    osl_int_set_si(precision, &system->m[constraint][j], 1);
-    if (i == depth - 1) {
-      /* i <= i' at dimension depth if source is textually before target. */
-      osl_int_set_si(precision, &system->m[constraint][0], 1);
-      /* If source is textually after target, this is obviously i < i'. */
-      if (before || depth < min_dim) // sub 1 for the Arr dim
-        osl_int_set_si(precision, &system->m[constraint][nb_columns - 1], -1);
-    }
+//   k = 1;
+//   j = 1 + nb_output_dims;
+//   for (i = 0; i < depth; i++, k++, j++) {
+//     /* i = i' for all dimension less than depth. */
+//     osl_int_set_si(precision, &system->m[constraint][k], -1);
+//     osl_int_set_si(precision, &system->m[constraint][j], 1);
+//     if (i == depth - 1) {
+//       /* i <= i' at dimension depth if source is textually before target. */
+//       osl_int_set_si(precision, &system->m[constraint][0], 1);
+//       /* If source is textually after target, this is obviously i < i'. */
+//       if (before || depth < min_dim) // sub 1 for the Arr dim
+//         osl_int_set_si(precision, &system->m[constraint][nb_columns - 1], -1);
+//     }
 
-    constraint++;
-  }
+//     constraint++;
+//   }
   
-  system->nb_output_dims = nb_output_dims;
-  system->nb_input_dims = nb_input_dims;
-  system->nb_parameters = nb_par;
-  system->nb_local_dims = nb_local_dims;
-  system->type = OSL_UNDEFINED;
+//   system->nb_output_dims = nb_output_dims;
+//   system->nb_input_dims = nb_input_dims;
+//   system->nb_parameters = nb_par;
+//   system->nb_local_dims = nb_local_dims;
+//   system->type = OSL_UNDEFINED;
   
-  dependence->domain = system;
+//   dependence->domain = system;
   
-  return dependence; 
-}
+//   return dependence; 
+// }
 
 
 /**
@@ -729,198 +1263,198 @@ static osl_dependence_p candl_dependence_build_system(
  * - 18/09/2003: first version.
  * - 09/12/2005: few corrections and polishing.
  */
-osl_dependence_p candl_dependence_system(osl_statement_p source,
-                                           osl_statement_p target,
-                                           osl_relation_p context,
-                                           osl_relation_p array_s,
-                                           osl_relation_p array_t,
-                                           int ref_s, int ref_t,
-                                           int type, int depth) {
-  candl_statement_usr_p s_usr = source->usr;
-  candl_statement_usr_p t_usr = target->usr;
-  osl_dependence_p dependence = NULL;
+// osl_dependence_p candl_dependence_system(osl_statement_p source,
+//                                            osl_statement_p target,
+//                                            osl_relation_p context,
+//                                            osl_relation_p array_s,
+//                                            osl_relation_p array_t,
+//                                            int ref_s, int ref_t,
+//                                            int type, int depth) {
+//   candl_statement_usr_p s_usr = source->usr;
+//   candl_statement_usr_p t_usr = target->usr;
+//   osl_dependence_p dependence = NULL;
 
-  /* First, a trivial case: for two different statements at depth 0, there is
-   * a dependence only if the source is textually before the target.
-   */
-  if ((source != target) && (depth == 0) && 
-      (s_usr->label > t_usr->label))
-    return NULL;
+//   /* First, a trivial case: for two different statements at depth 0, there is
+//    * a dependence only if the source is textually before the target.
+//    */
+//   if ((source != target) && (depth == 0) && 
+//       (s_usr->label > t_usr->label))
+//     return NULL;
     
-  /* We build the system of constraints. */
-  dependence = candl_dependence_build_system(source,  target,
-                                             array_s, array_t, 
-                                             depth,
-                                             (s_usr->label >= 
-                                              t_usr->label));
+//   /* We build the system of constraints. */
+//   dependence = candl_dependence_build_system(source,  target,
+//                                              array_s, array_t, 
+//                                              depth,
+//                                              (s_usr->label >= 
+//                                               t_usr->label));
 
-  /* We start by simple SIV/ZIV/GCD tests. */
-  if (!candl_dependence_gcd_test(source, target, dependence->domain, depth)) {
-    osl_dependence_free(dependence);
-    return NULL;
-  }
+//   /* We start by simple SIV/ZIV/GCD tests. */
+//   if (!candl_dependence_gcd_test(source, target, dependence->domain, depth)) {
+//     osl_dependence_free(dependence);
+//     return NULL;
+//   }
 
-  if (pip_has_rational_point(dependence->domain, context, 1)) {
-    /* We set the various fields with corresponding values. */
-    dependence->ref_source = ref_s;
-    dependence->ref_target = ref_t;      
-    dependence->label_source = ((candl_statement_usr_p)source->usr)->label;
-    dependence->label_target = ((candl_statement_usr_p)target->usr)->label;
-    dependence->type  = type;
-    dependence->depth = depth;
-    dependence->stmt_source_ptr       = source;
-    dependence->stmt_target_ptr       = target;
-    dependence->ref_source_access_ptr = array_s;
-    dependence->ref_target_access_ptr = array_t;
-  } else {
-    osl_dependence_free(dependence);
-    dependence = NULL;
-  }
+//   if (pip_has_rational_point(dependence->domain, context, 1)) {
+//     /* We set the various fields with corresponding values. */
+//     dependence->ref_source = ref_s;
+//     dependence->ref_target = ref_t;      
+//     dependence->label_source = ((candl_statement_usr_p)source->usr)->label;
+//     dependence->label_target = ((candl_statement_usr_p)target->usr)->label;
+//     dependence->type  = type;
+//     dependence->depth = depth;
+//     dependence->stmt_source_ptr       = source;
+//     dependence->stmt_target_ptr       = target;
+//     dependence->ref_source_access_ptr = array_s;
+//     dependence->ref_target_access_ptr = array_t;
+//   } else {
+//     osl_dependence_free(dependence);
+//     dependence = NULL;
+//   }
 
-  return dependence;
-}
+//   return dependence;
+// }
 
 
-/**
- * candl_dependence_between function :
- * this function builds the dependence list from the statement "source" to
- * statement "target": it will study the dependence for each reference and for
- * each depth, under a particular context (context) and according to some
- * user options.
- * - 18/09/2003: first version.
- * - 07/12/2005: (debug) correction of depth bounds.
- * - 09/12/2005: We may take commutativity into consideration.
- */
-osl_dependence_p candl_dependence_between(osl_statement_p source,
-                                            osl_statement_p target,
-                                            osl_relation_p context,
-                                            candl_options_p options) {
-  osl_dependence_p new;
-  osl_dependence_p dependence = NULL;
-  osl_dependence_p now;
-  osl_relation_list_p access_src, access_targ;
-  osl_relation_p elt_src, elt_targ;
-  candl_statement_usr_p s_usr = source->usr;
-  candl_statement_usr_p t_usr = target->usr;
-  int i, min_depth, max_depth;
-  int src_id, targ_id;
-  int ref_s, ref_t;
+// /**
+//  * candl_dependence_between function :
+//  * this function builds the dependence list from the statement "source" to
+//  * statement "target": it will study the dependence for each reference and for
+//  * each depth, under a particular context (context) and according to some
+//  * user options.
+//  * - 18/09/2003: first version.
+//  * - 07/12/2005: (debug) correction of depth bounds.
+//  * - 09/12/2005: We may take commutativity into consideration.
+//  */
+// osl_dependence_p candl_dependence_between(osl_statement_p source,
+//                                             osl_statement_p target,
+//                                             osl_relation_p context,
+//                                             candl_options_p options) {
+//   osl_dependence_p new;
+//   osl_dependence_p dependence = NULL;
+//   osl_dependence_p now;
+//   osl_relation_list_p access_src, access_targ;
+//   osl_relation_p elt_src, elt_targ;
+//   candl_statement_usr_p s_usr = source->usr;
+//   candl_statement_usr_p t_usr = target->usr;
+//   int i, min_depth, max_depth;
+//   int src_id, targ_id;
+//   int ref_s, ref_t;
   
-  /* If the statements commute and the user asks to use this information to
-   * simplify the dependence graph, we return no dependences.
-   */
-  if (options->commute && candl_util_statement_commute(source, target))
-    return NULL;
+//   /* If the statements commute and the user asks to use this information to
+//    * simplify the dependence graph, we return no dependences.
+//    */
+//   if (options->commute && candl_util_statement_commute(source, target))
+//     return NULL;
 
-  /* In the case of a self-dependence, the dependence depth can be as low as 1
-   * (not 0 because at depth 0 there is no loop, thus there is only one
-   * instance of the statement !) and as high as the statement depth.
-   * In the case of different statements, the dependence depth can be as low
-   * as 0 and as high as the number of shared loops.
-   */
-  if (source == target) {
-    min_depth = 1;
-    max_depth = s_usr->depth;
-  } else {
-    /* Depth 0 is for statements that don't share any loop. */
-    if (s_usr->depth > 0 && t_usr->depth > 0)
-      min_depth = (s_usr->index[0] == t_usr->index[0]) ? 1 : 0;
-    else
-      min_depth = 0;
+//   /* In the case of a self-dependence, the dependence depth can be as low as 1
+//    * (not 0 because at depth 0 there is no loop, thus there is only one
+//    * instance of the statement !) and as high as the statement depth.
+//    * In the case of different statements, the dependence depth can be as low
+//    * as 0 and as high as the number of shared loops.
+//    */
+//   if (source == target) {
+//     min_depth = 1;
+//     max_depth = s_usr->depth;
+//   } else {
+//     /* Depth 0 is for statements that don't share any loop. */
+//     if (s_usr->depth > 0 && t_usr->depth > 0)
+//       min_depth = (s_usr->index[0] == t_usr->index[0]) ? 1 : 0;
+//     else
+//       min_depth = 0;
 
-    max_depth = 0;
-    while ((max_depth < s_usr->depth) &&
-           (max_depth < t_usr->depth) &&
-           (s_usr->index[max_depth] == t_usr->index[max_depth]))
-      max_depth++;
-  }
+//     max_depth = 0;
+//     while ((max_depth < s_usr->depth) &&
+//            (max_depth < t_usr->depth) &&
+//            (s_usr->index[max_depth] == t_usr->index[max_depth]))
+//       max_depth++;
+//   }
   
-  ref_s = 0;
-  access_src = source->access;
+//   ref_s = 0;
+//   access_src = source->access;
   
-  for (; access_src != NULL; access_src = access_src->next, ref_s++) {
-    elt_src = access_src->elt;
-    src_id = osl_relation_get_array_id(elt_src);
+//   for (; access_src != NULL; access_src = access_src->next, ref_s++) {
+//     elt_src = access_src->elt;
+//     src_id = osl_relation_get_array_id(elt_src);
     
-    switch(elt_src->type) {
+//     switch(elt_src->type) {
     
-      /* Anti and input-dependences analysis. */
-      case OSL_TYPE_READ: /* source READ */
-        if (!options->war && !options->rar)
-          break;
-        access_targ = target->access;
-        ref_t = 0;
-        for (; access_targ != NULL; access_targ = access_targ->next, ref_t++) {
-          elt_targ = access_targ->elt;
-          targ_id  = osl_relation_get_array_id(elt_targ);
+//       /* Anti and input-dependences analysis. */
+//       case OSL_TYPE_READ: /* source READ */
+//         if (!options->war && !options->rar)
+//           break;
+//         access_targ = target->access;
+//         ref_t = 0;
+//         for (; access_targ != NULL; access_targ = access_targ->next, ref_t++) {
+//           elt_targ = access_targ->elt;
+//           targ_id  = osl_relation_get_array_id(elt_targ);
           
-          /* Anti-dependences analysis. */
-          if (elt_targ->type != OSL_TYPE_READ) { /* target WRITE | MAY_WRITE */
-            if (options->war && src_id == targ_id) {
-              for (i = min_depth; i <= max_depth; i++) {
-                new = candl_dependence_system(source, target, context,
-                                              elt_src, elt_targ,
-                                              ref_s, ref_t,
-                                              OSL_DEPENDENCE_WAR, i);
-                osl_dependence_add(&dependence, &now, new);
-              }
-            }
-          }
-          /* Input-dependences analysis. */
-          else { /* target READ */
-            if (options->rar && src_id == targ_id) {
-              for (i = min_depth; i <= max_depth; i++) {
-                new = candl_dependence_system(source, target, context,
-                                              elt_src, elt_targ,
-                                              ref_s, ref_t,
-                                              OSL_DEPENDENCE_RAR, i);
-                osl_dependence_add(&dependence, &now, new);
-              }
-            }
-          }
-        }
-        break;
+//           /* Anti-dependences analysis. */
+//           if (elt_targ->type != OSL_TYPE_READ) { /* target WRITE | MAY_WRITE */
+//             if (options->war && src_id == targ_id) {
+//               for (i = min_depth; i <= max_depth; i++) {
+//                 new = candl_dependence_system(source, target, context,
+//                                               elt_src, elt_targ,
+//                                               ref_s, ref_t,
+//                                               OSL_DEPENDENCE_WAR, i);
+//                 osl_dependence_add(&dependence, &now, new);
+//               }
+//             }
+//           }
+//           /* Input-dependences analysis. */
+//           else { /* target READ */
+//             if (options->rar && src_id == targ_id) {
+//               for (i = min_depth; i <= max_depth; i++) {
+//                 new = candl_dependence_system(source, target, context,
+//                                               elt_src, elt_targ,
+//                                               ref_s, ref_t,
+//                                               OSL_DEPENDENCE_RAR, i);
+//                 osl_dependence_add(&dependence, &now, new);
+//               }
+//             }
+//           }
+//         }
+//         break;
      
-      default: /* source WRITE | MAY-WRITE */
-        if (!options->raw && !options->waw)
-          break;
-        access_targ = target->access;
-        ref_t = 0;
-        for (; access_targ != NULL; access_targ = access_targ->next, ref_t++) {
-          elt_targ = access_targ->elt;
-          targ_id = osl_relation_get_array_id(elt_targ);
+//       default: /* source WRITE | MAY-WRITE */
+//         if (!options->raw && !options->waw)
+//           break;
+//         access_targ = target->access;
+//         ref_t = 0;
+//         for (; access_targ != NULL; access_targ = access_targ->next, ref_t++) {
+//           elt_targ = access_targ->elt;
+//           targ_id = osl_relation_get_array_id(elt_targ);
           
-          /* Anti-dependences analysis. */
-          if (elt_targ->type != OSL_TYPE_READ) { /* target WRITE | MAY_WRITE */
-            if (options->waw && src_id == targ_id) {
-              for (i = min_depth; i <= max_depth; i++) {
-                new = candl_dependence_system(source, target, context,
-                                              elt_src, elt_targ,
-                                              ref_s, ref_t,
-                                              OSL_DEPENDENCE_WAW, i);
-                osl_dependence_add(&dependence, &now, new);
-              }
-            }
-          }
-          /* Input-dependences analysis. */
-          else { /* target READ */
-            if (options->raw && src_id == targ_id) {
-              for (i = min_depth; i <= max_depth; i++) {
-                new = candl_dependence_system(source, target, context,
-                                              elt_src, elt_targ,
-                                              ref_s, ref_t,
-                                              OSL_DEPENDENCE_RAW, i);
-                osl_dependence_add(&dependence, &now, new);
-              }
-            }
-          }
-        }
-        break;
-    }
-  }
+//           /* Anti-dependences analysis. */
+//           if (elt_targ->type != OSL_TYPE_READ) { /* target WRITE | MAY_WRITE */
+//             if (options->waw && src_id == targ_id) {
+//               for (i = min_depth; i <= max_depth; i++) {
+//                 new = candl_dependence_system(source, target, context,
+//                                               elt_src, elt_targ,
+//                                               ref_s, ref_t,
+//                                               OSL_DEPENDENCE_WAW, i);
+//                 osl_dependence_add(&dependence, &now, new);
+//               }
+//             }
+//           }
+//           /* Input-dependences analysis. */
+//           else { /* target READ */
+//             if (options->raw && src_id == targ_id) {
+//               for (i = min_depth; i <= max_depth; i++) {
+//                 new = candl_dependence_system(source, target, context,
+//                                               elt_src, elt_targ,
+//                                               ref_s, ref_t,
+//                                               OSL_DEPENDENCE_RAW, i);
+//                 osl_dependence_add(&dependence, &now, new);
+//               }
+//             }
+//           }
+//         }
+//         break;
+//     }
+//   }
   
-  return dependence;
-}
+//   return dependence;
+// }
 
 
 /**
@@ -1806,6 +2340,7 @@ int candl_dependence_is_loop_carried(osl_dependence_p dep,
 
   /*   return !ret; */
 }
+
 
 
 /**

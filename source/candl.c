@@ -131,7 +131,7 @@ int main(int argc, char * argv[]) {
 
         dep = osl_generic_lookup(s1->extension, OSL_URI_DEPENDENCE);
         fprintf(output, "\n\033[33mDEPENDENCES GRAPH:\033[00m\n");
-        candl_dependence_pprint(output, dep);
+        candl_dependence_pprint(output, dep, orig_scop, options);
         fprintf(output, "\n\n\033[33mVIOLATIONS GRAPH:\033[00m\n");
         candl_violation_pprint(output, violations[i]);
       }
@@ -143,7 +143,7 @@ int main(int argc, char * argv[]) {
 
         dep = osl_generic_lookup(s1->extension, OSL_URI_DEPENDENCE);
         fprintf(output, "\n\033[33mDEPENDENCES GRAPH:\033[00m\n");
-        candl_dependence_pprint(output, dep);
+        candl_dependence_pprint(output, dep, s1, options);
       }
     }
 
@@ -164,10 +164,10 @@ int main(int argc, char * argv[]) {
     for(i=0; i< num_scops; i++, s1=s1->next){
       dep = osl_generic_lookup(s1->extension, OSL_URI_DEPENDENCE);
       fprintf(output, "\033[33mSCOP #%d:\033[00m\n", i+1);
-      candl_dependence_pprint(output, dep);
+      candl_dependence_pprint(output, dep, s1, options);
       fprintf(output, "\n");
       if (options->view)
-        candl_dependence_view(dep);
+        candl_dependence_view(dep, s1, options);
     }
   }
 
